@@ -1,846 +1,275 @@
 <?php
-session_start();
+// ==========================================
+// 1. DATABASE CONFIGURATION
+// ==========================================
+$host = 'localhost';
+$db   = 'biometric_db';
+$user = 'root';
+$pass = '';
 
-// Database Connection
-$host = "localhost";
-$user = "root";
-$pass = "";
-$db = "impact_hope";
-
-$conn = new mysqli($host, $user, $pass, $db);
-if ($conn->connect_error) {
-    die("Connection failed: " . $conn->connect_error);
+try {
+    $pdo = new PDO("mysql:host=$host;dbname=$db;charset=utf8mb4", $user, $pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+    ]);
+} catch (PDOException $e) {
+    die("Database Connection Error: " . $e->getMessage());
 }
 
-// Auto-create needed tables if they don't exist yet
-$conn->query("CREATE TABLE IF NOT EXISTS unhcr_updates (
+// Reba ko Table yuzuye muri Database
+$pdo->exec("CREATE TABLE IF NOT EXISTS full_citizens_registry (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    title VARCHAR(255) NOT NULL,
-    category VARCHAR(100) NOT NULL,
-    target_camp VARCHAR(100) NOT NULL,
-    status VARCHAR(50) DEFAULT 'Active',
-    effective_date DATE,
-    description TEXT,
+    uin VARCHAR(20) UNIQUE NOT NULL,
+    national_id_ref VARCHAR(50) UNIQUE NOT NULL,
+    full_name VARCHAR(100) NOT NULL,
+    dob DATE NOT NULL,
+    gender VARCHAR(10) NOT NULL,
+    phone VARCHAR(20) NOT NULL,
+    thumbprint_hash VARCHAR(255) NOT NULL,
+    fingerprints_hash VARCHAR(255) NOT NULL,
+    iris_hash VARCHAR(255) NOT NULL,
+    face_photo LONGTEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )");
-
-$conn->query("CREATE TABLE IF NOT EXISTS hospital_records (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    invoice_number VARCHAR(100) NOT NULL,
-    hospital_name VARCHAR(255) NOT NULL,
-    hospital_phone VARCHAR(50) NOT NULL,
-    student_id VARCHAR(100) NOT NULL,
-    student_name VARCHAR(255) NOT NULL,
-    school_name VARCHAR(255) NOT NULL,
-    age INT NOT NULL,
-    gender VARCHAR(20) NOT NULL,
-    course_studied VARCHAR(255) NOT NULL,
-    parent_names VARCHAR(255) NOT NULL,
-    camp VARCHAR(100) NOT NULL,
-    province VARCHAR(100) NOT NULL,
-    district VARCHAR(100) NOT NULL,
-    sector VARCHAR(100) NOT NULL,
-    cell VARCHAR(100) NOT NULL,
-    village VARCHAR(100) NOT NULL,
-    disease VARCHAR(255) NOT NULL,
-    medication TEXT NOT NULL,
-    amount_paid DECIMAL(10,2) NOT NULL,
-    treatment_datetime DATETIME NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-$conn->query("CREATE TABLE IF NOT EXISTS partner_schools (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    school_name VARCHAR(255) NOT NULL,
-    location VARCHAR(255) NOT NULL,
-    tuition_fee DECIMAL(10,2) NOT NULL,
-    boarding_fee DECIMAL(10,2) DEFAULT 0,
-    announcements TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Simulated UNHCR API Verification function
-function verifyWithUNHCR($id_number, $parent_name) {
-    if (!empty($id_number) && strlen($id_number) >= 5) {
-        return ['verified' => true, 'message' => 'Verified refugee status via UNHCR API'];
-    }
-    return ['verified' => false, 'message' => 'Invalid or unverified UNHCR ID'];
-}
-
-// Simulated Email/SMS sending function
-function sendNotification($email, $phone, $status, $student_name) {
-    return true;
-}
-
-// Log actions
-function logAction($conn, $action, $details) {
-    $stmt = $conn->prepare("INSERT INTO system_logs (action, details) VALUES (?, ?)");
-    if ($stmt) {
-        $stmt->bind_param("ss", $action, $details);
-        $stmt->execute();
-    }
-}
 
 $message = "";
-$message_type = "";
+$error = "";
 
-// 1. REGISTRATION LOGIC
-if (isset($_POST['register'])) {
-    $username = trim($_POST['username']);
-    $password = password_hash($_POST['password'], PASSWORD_DEFAULT);
-    
-    $stmt = $conn->prepare("INSERT INTO users (username, password) VALUES (?, ?)");
-    $stmt->bind_param("ss", $username, $password);
-    if ($stmt->execute()) {
-        $message = "Account created successfully! You can now log in below.";
-        $message_type = "success";
-        logAction($conn, "Registration", "User registered: $username");
-    } else {
-        $message = "Username already exists.";
-        $message_type = "danger";
-    }
-}
+// ==========================================
+// 2. ENROLLMENT ENGINE
+// ==========================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $ref_id       = trim($_POST['ref_id'] ?? '');
+    $full_name    = trim($_POST['full_name'] ?? '');
+    $dob          = trim($_POST['dob'] ?? '');
+    $gender       = trim($_POST['gender'] ?? '');
+    $phone        = trim($_POST['phone'] ?? '');
+    $thumbprint   = trim($_POST['thumbprint'] ?? '');
+    $fingerprints = trim($_POST['fingerprints'] ?? '');
+    $iris         = trim($_POST['iris'] ?? '');
+    $photo        = trim($_POST['photo'] ?? '');
 
-// 2. LOGIN LOGIC
-if (isset($_POST['login'])) {
-    $username = trim($_POST['username']);
-    $password = $_POST['password'];
-    
-    $stmt = $conn->prepare("SELECT * FROM users WHERE username = ?");
-    $stmt->bind_param("s", $username);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    if ($user = $result->fetch_assoc()) {
-        if (password_verify($password, $user['password'])) {
-            $_SESSION['user'] = $user['username'];
-            logAction($conn, "Login", "User logged in: " . $user['username']);
-            header("Location: index.php");
-            exit;
+    if (!empty($ref_id) && !empty($full_name) && !empty($dob) && !empty($phone) && !empty($thumbprint) && !empty($fingerprints) && !empty($photo)) {
+        
+        $thumb_hash = hash('sha256', $thumbprint);
+        $fp_hash    = hash('sha256', $fingerprints);
+        $iris_hash  = hash('sha256', $iris);
+
+        // ABIS De-duplication Check
+        $check = $pdo->prepare("SELECT uin FROM full_citizens_registry WHERE thumbprint_hash = ? OR fingerprints_hash = ?");
+        $check->execute([$thumb_hash, $fp_hash]);
+        
+        if ($check->fetch()) {
+            $error = "<strong>ABIS DE-DUPLICATION FAILED!</strong> Ibi biranga umuntu biyunguruwe ko abandi bamaze kwandikwa!";
         } else {
-            $message = "Incorrect password.";
-            $message_type = "danger";
+            $uin = "UIN-" . rand(10000000, 99999999);
+            $stmt = $pdo->prepare("INSERT INTO full_citizens_registry (uin, national_id_ref, full_name, dob, gender, phone, thumbprint_hash, fingerprints_hash, iris_hash, face_photo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            
+            if ($stmt->execute([$uin, $ref_id, $full_name, $dob, $gender, $phone, $thumb_hash, $fp_hash, $iris_hash, $photo])) {
+                $message = "<strong>REGISTRATION SUCCESSFUL!</strong> UIN Yaremywe: <u>$uin</u>";
+            } else {
+                $error = "Hano habaye ikosa mu kubika data.";
+            }
         }
     } else {
-        $message = "User not found.";
-        $message_type = "danger";
+        $error = "Nyamuneka uzuze imyirondoro n'ibiranga umuntu vyose zvagengewe!";
     }
 }
 
-// 3. LOGOUT LOGIC
-if (isset($_GET['logout'])) {
-    logAction($conn, "Logout", "User logged out: " . $_SESSION['user']);
-    session_destroy();
-    header("Location: index.php");
-    exit;
-}
-
-// Helper upload function
-function uploadFile($file_key) {
-    if (isset($_FILES[$file_key]) && $_FILES[$file_key]['error'] == 0) {
-        $target_dir = "uploads/";
-        if (!file_exists($target_dir)) {
-            mkdir($target_dir, 0777, true);
-        }
-        $filename = time() . "_" . basename($_FILES[$file_key]["name"]);
-        $target_file = $target_dir . $filename;
-        if (move_uploaded_file($_FILES[$file_key]["tmp_name"], $target_file)) {
-            return $target_file;
-        }
-    }
-    return "";
-}
-
-// 4. UNIVERSITY APPLICATION SUBMISSION
-if (isset($_POST['submit_university'])) {
-    $name = $_POST['student_name'];
-    $marks = intval($_POST['marks']);
-    $national_id = $_POST['national_id'];
-    $asylum_cert = $_POST['asylum_cert'];
-    $origin_country = $_POST['origin_country'];
-    $province = $_POST['province'];
-    $district = $_POST['district'];
-    $sector = $_POST['sector'];
-    $cell = $_POST['cell'];
-    $village = $_POST['village'];
-    $parent_phone = $_POST['parent_phone'];
-    $parent_names = $_POST['parent_names'];
-    $email = $_POST['email'];
-    $father_name = $_POST['father_name'];
-    $mother_name = $_POST['mother_name'];
-    $alevel_subject = $_POST['alevel_subject'];
-    $camp = $_POST['camp'];
-    
-    $result_slip = uploadFile('result_slip');
-    $proof_photocopy = uploadFile('proof_photocopy');
-    
-    $unhcr = verifyWithUNHCR($national_id, $parent_names);
-    
-    if ($marks >= 80 && $unhcr['verified']) {
-        $status = "Accepted";
-    } else {
-        $status = "Rejected";
-    }
-    
-    $stmt = $conn->prepare("INSERT INTO university (student_name, marks, national_id, asylum_cert, origin_country, province, district, sector, cell, village, parent_phone, parent_names, email, father_name, mother_name, alevel_subject, camp, result_slip, proof_photocopy, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    $stmt->bind_param("sissssssssssssssssss", $name, $marks, $national_id, $asylum_cert, $origin_country, $province, $district, $sector, $cell, $village, $parent_phone, $parent_names, $email, $father_name, $mother_name, $alevel_subject, $camp, $result_slip, $proof_photocopy, $status);
-    
-    if ($stmt->execute()) {
-        sendNotification($email, $parent_phone, $status, $name);
-        logAction($conn, "University App", "Submitted application for $name. Status: $status");
-        $message = "Application submitted! Status: $status (Email sent to $email)";
-        $message_type = ($status == "Accepted") ? "success" : "warning";
-    } else {
-        $message = "Error submitting application.";
-        $message_type = "danger";
-    }
-}
-
-// 5. A-LEVEL APPLICATION SUBMISSION
-if (isset($_POST['submit_alevel'])) {
-    $name = $_POST['student_name'];
-    $marks = intval($_POST['marks']);
-    $national_id = $_POST['national_id'];
-    $asylum_cert = $_POST['asylum_cert'];
-    $origin_country = $_POST['origin_country'];
-    $province = $_POST['province'];
-    $district = $_POST['district'];
-    $sector = $_POST['sector'];
-    $cell = $_POST['cell'];
-    $village = $_POST['village'];
-    $parent_phone = $_POST['parent_phone'];
-    $parent_names = $_POST['parent_names'];
-    $email = $_POST['email'];
-    $father_name = $_POST['father_name'];
-    $mother_name = $_POST['mother_name'];
-    $camp = $_POST['camp'];
-    
-    $result_slip = uploadFile('result_slip');
-    $proof_photocopy = uploadFile('proof_photocopy');
-    
-    $unhcr = verifyWithUNHCR($national_id, $parent_names);
-    
-    if ($marks >= 70 && $unhcr['verified']) {
-        $status = "Accepted";
-    } else {
-        $status = "Rejected";
-    }
-    
-    $stmt = $conn->prepare("INSERT INTO alevel (student_name, marks, national_id, asylum_cert, origin_country, province, district, sector, cell, village, parent_phone, parent_names, email, father_name, mother_name, camp, result_slip, proof_photocopy, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    $stmt->bind_param("sisssssssssssssssss", $name, $marks, $national_id, $asylum_cert, $origin_country, $province, $district, $sector, $cell, $village, $parent_phone, $parent_names, $email, $father_name, $mother_name, $camp, $result_slip, $proof_photocopy, $status);
-    
-    if ($stmt->execute()) {
-        sendNotification($email, $parent_phone, $status, $name);
-        logAction($conn, "Alevel App", "Submitted application for $name. Status: $status");
-        $message = "A-Level Application submitted! Status: $status";
-        $message_type = ($status == "Accepted") ? "success" : "warning";
-    }
-}
-
-// 6. SUMMER TRAINING SUBMISSION
-if (isset($_POST['submit_summer'])) {
-    $name = $_POST['student_name'];
-    $prev = $_POST['previous_level'];
-    $next = $_POST['next_level'];
-    $school = $_POST['school_name'];
-    $subject = $_POST['subject_studied'];
-    $parent_phone = $_POST['parent_phone'];
-    $gender = $_POST['gender'];
-    
-    $stmt = $conn->prepare("INSERT INTO summer_training (student_name, previous_level, next_level, school_name, subject_studied, parent_phone, gender) VALUES (?, ?, ?, ?, ?, ?, ?)");
-    $stmt->bind_param("sssssss", $name, $prev, $next, $school, $subject, $parent_phone, $gender);
-    if ($stmt->execute()) {
-        logAction($conn, "Summer Training", "Enrolled: $name");
-        $message = "Summer Training Registration successful!";
-        $message_type = "success";
-    }
-}
-
-// 7. SHORT COURSES SUBMISSION
-if (isset($_POST['submit_short'])) {
-    $name = $_POST['student_name'];
-    $national_id = $_POST['national_id'];
-    $course_studied = $_POST['course_studied'];
-    $school = $_POST['school_attended'];
-    $desired = $_POST['course_desired'];
-    $camp = $_POST['camp'];
-    $country = $_POST['origin_country'];
-    $province = $_POST['province'];
-    $district = $_POST['district'];
-    $sector = $_POST['sector'];
-    $cell = $_POST['cell'];
-    $village = $_POST['village'];
-    
-    $diploma = uploadFile('diploma_upload');
-    
-    $stmt = $conn->prepare("INSERT INTO short_courses (student_name, national_id, course_studied, school_attended, course_desired, camp, origin_country, province, district, sector, cell, village, diploma_upload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    $stmt->bind_param("sssssssssssss", $name, $national_id, $course_studied, $school, $desired, $camp, $country, $province, $district, $sector, $cell, $village, $diploma);
-    if ($stmt->execute()) {
-        logAction($conn, "Short Course", "Registered: $name");
-        $message = "Short Course Application Submitted successfully!";
-        $message_type = "success";
-    }
-}
+$citizens = $pdo->query("SELECT * FROM full_citizens_registry ORDER BY id DESC")->fetchAll();
 ?>
+
 <!DOCTYPE html>
-<html lang="en">
+<html lang="rw">
 <head>
     <meta charset="UTF-8">
-    <title>Impact Hope in Rwanda</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>National Identity Security Engine</title>
     <style>
-        :root {
-            --primary: #f28c28;
-            --dark: #222;
-            --light: #f9f9f9;
-            --border: #ddd;
-        }
         * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        body { margin: 0; background: var(--light); color: var(--dark); }
+        body { background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }
+        .container { max-width: 1100px; margin: 0 auto; background: #1e293b; padding: 30px; border-radius: 12px; }
+        .header { text-align: center; border-bottom: 2px solid #334155; padding-bottom: 15px; margin-bottom: 25px; }
         
-        /* Header & Navbar */
-        header { background: #fff; border-bottom: 3px solid var(--primary); padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; }
-        .logo-area { display: flex; align-items: center; gap: 15px; }
-        .logo-area img { height: 70px; }
-        .logo-area h1 { margin: 0; font-size: 24px; color: var(--dark); }
-        
-        nav { background: var(--dark); display: flex; flex-wrap: wrap; }
-        nav a { color: #fff; padding: 14px 20px; text-decoration: none; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        nav a:hover, nav a.active { background: var(--primary); color: #fff; }
-        
-        .container { max-width: 1250px; margin: 30px auto; padding: 20px; background: #fff; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
-        
-        /* Forms styling */
-        h2 { border-left: 5px solid var(--primary); padding-left: 10px; margin-bottom: 20px; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; margin-bottom: 15px; }
-        .form-group { display: flex; flex-direction: column; }
-        .form-group label { font-size: 13px; font-weight: bold; margin-bottom: 5px; }
-        .form-group input, .form-group select, .form-group textarea { padding: 10px; border: 1px solid var(--border); border-radius: 4px; }
-        button { background: var(--primary); color: white; border: none; padding: 12px 25px; border-radius: 4px; font-size: 16px; cursor: pointer; font-weight: bold; }
-        button:hover { background: #d77615; }
-        
-        /* Alerts */
-        .alert { padding: 15px; margin-bottom: 20px; border-radius: 4px; font-weight: bold; }
-        .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .alert-danger { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .alert-warning { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
-        
-        /* Section views */
-        .page-section { display: none; }
-        .page-section.active { display: block; }
-        
-        /* Tables styling */
-        .table-responsive { width: 100%; overflow-x: auto; margin-top: 15px; }
-        table { width: 100%; border-collapse: collapse; background: #fff; font-size: 13px; }
-        table th, table td { padding: 10px; border: 1px solid var(--border); text-align: left; }
-        table th { background: #f2f2f2; white-space: nowrap; }
-        .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
-        .badge-accepted { background: #28a745; color: white; }
-        .badge-rejected { background: #dc3545; color: white; }
-        .badge-pending { background: #ffc107; color: black; }
-        
-        /* Upload preview screen */
-        .preview-img { max-width: 150px; border: 1px solid var(--border); margin-top: 5px; border-radius: 4px; display: block; }
-        
-        /* Footer styling */
-        footer { background: var(--dark); color: #ccc; padding: 30px 20px; font-size: 14px; margin-top: 50px; }
-        .footer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; max-width: 1200px; margin: 0 auto; }
-        .footer-grid h4 { color: var(--primary); margin-top: 0; }
-        .footer-bottom { text-align: center; margin-top: 20px; padding-top: 20px; border-top: 1px solid #444; font-size: 12px; }
+        .alert { padding: 15px; border-radius: 8px; margin-bottom: 20px; font-weight: bold; }
+        .alert-success { background: #064e3b; color: #6ee7b7; border: 1px solid #059669; }
+        .alert-danger { background: #7f1d1d; color: #fca5a5; border: 1px solid #dc2626; }
+
+        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; }
+        .input-group { margin-bottom: 15px; }
+        .input-group label { display: block; margin-bottom: 5px; color: #94a3b8; font-size: 0.9rem; }
+        .input-group input, .input-group select { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #fff; }
+
+        .devices-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 15px; margin-top: 20px; }
+        .device-card { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 15px; text-align: center; }
+
+        .progress-bar { width: 100%; height: 8px; background: #334155; border-radius: 4px; overflow: hidden; margin: 12px 0; }
+        .progress-fill { height: 100%; width: 0%; background: #22c55e; transition: width 0.3s; }
+
+        .status-badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.8rem; font-weight: bold; background: #334155; color: #94a3b8; }
+        .status-badge.active { background: #065f46; color: #34d399; }
+
+        .btn-capture { background: #0284c7; color: white; border: none; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; }
+        #camera-preview { width: 100%; height: 150px; background: #000; border-radius: 6px; object-fit: cover; }
+        .btn-submit { width: 100%; background: #16a34a; color: white; border: none; padding: 15px; font-size: 1.1rem; border-radius: 8px; font-weight: bold; margin-top: 25px; cursor: pointer; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 30px; background: #0f172a; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #334155; }
+        th { background: #1e293b; color: #38bdf8; }
     </style>
 </head>
 <body>
 
-<header>
-    <div class="logo-area">
-        <img src="images.jpg" alt="Impact Hope Logo">
-        <h1>Impact Hope in Rwanda</h1>
-    </div>
-    <div>
-        <?php if (isset($_SESSION['user'])): ?>
-            <span>Logged in as: <strong><?php echo htmlspecialchars($_SESSION['user']); ?></strong> | <a href="?logout=1" style="color: var(--primary);">Logout</a></span>
-        <?php endif; ?>
-    </div>
-</header>
-
-<?php if (isset($_SESSION['user'])): ?>
-<!-- NAVIGATION BAR FOR LOGGED-IN USERS -->
-<nav id="mainNav">
-    <a onclick="showSection('university')" id="nav-university" class="active">University</a>
-    <a onclick="showSection('alevel')" id="nav-alevel">A-Level</a>
-    <a onclick="showSection('summer')" id="nav-summer">Summer Training</a>
-    <a onclick="showSection('short_course_nav')" id="nav-short_course_nav">Non-University / Short Course</a>
-    <a onclick="showSection('unhcr_updates')" id="nav-unhcr_updates">UNHCR Updates</a>
-    <a onclick="showSection('hospital_info')" id="nav-hospital_info">All Hospital Information</a>
-    <a onclick="showSection('all_students')" id="nav-all_students">All Students</a>
-    <a onclick="showSection('all_schools')" id="nav-all_schools">All Schools (News & Fees)</a>
-    <a onclick="showSection('all_info')" id="nav-all_info">All DB Information</a>
-</nav>
-<?php endif; ?>
-
 <div class="container">
-    <?php if (!empty($message)): ?>
-        <div class="alert alert-<?php echo $message_type; ?>"><?php echo $message; ?></div>
-    <?php endif; ?>
+    <div class="header">
+        <h1>National Identity & Biometric Registry</h1>
+        <p style="color:#94a3b8;">Full Registration Engine (Imyirondoro, Igikumwe, Intoki, Amaso, n'Isura)</p>
+    </div>
 
-    <?php if (!isset($_SESSION['user'])): ?>
-        <!-- LOGIN & REGISTRATION SECTIONS -->
-        <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 40px;">
-            <div style="border-right: 1px solid var(--border); padding-right: 40px;">
-                <h2>Register Account</h2>
-                <form action="index.php" method="POST">
-                    <div class="form-group" style="margin-bottom: 15px;">
-                        <label>Username</label>
-                        <input type="text" name="username" required>
-                    </div>
-                    <div class="form-group" style="margin-bottom: 15px;">
-                        <label>Password</label>
-                        <input type="password" name="password" required>
-                    </div>
-                    <button type="submit" name="register">Register</button>
-                </form>
+    <?php if($message): ?><div class="alert alert-success"><?=$message?></div><?php endif; ?>
+    <?php if($error): ?><div class="alert alert-danger"><?=$error?></div><?php endif; ?>
+
+    <form action="index.php" method="POST">
+
+        <!-- 1. IMYIRONDORO YOSE -->
+        <h3>1. Imyirondoro yawe Yose (Demographics)</h3>
+        <div class="form-grid">
+            <div class="input-group">
+                <label>National ID / Application Ref</label>
+                <input type="text" name="ref_id" placeholder="11995800..." required />
             </div>
-            <div>
-                <h2>Login Here</h2>
-                <form action="index.php" method="POST">
-                    <div class="form-group" style="margin-bottom: 15px;">
-                        <label>Username</label>
-                        <input type="text" name="username" required>
-                    </div>
-                    <div class="form-group" style="margin-bottom: 15px;">
-                        <label>Password</label>
-                        <input type="password" name="password" required>
-                    </div>
-                    <button type="submit" name="login">Login</button>
-                </form>
+            <div class="input-group">
+                <label>Izina Ryose (Full Name)</label>
+                <input type="text" name="full_name" placeholder="Amazina yose" required />
             </div>
-        </div>
-
-    <?php else: ?>
-
-        <!-- ================= UNIVERSITY SECTION ================= -->
-        <div id="university" class="page-section active">
-            <h2>University Application Form</h2>
-            <form action="index.php" method="POST" enctype="multipart/form-data">
-                <div class="grid">
-                    <div class="form-group"><label>Full Student Name</label><input type="text" name="student_name" required></div>
-                    <div class="form-group"><label>A-Level Score/Marks (>=80)</label><input type="number" name="marks" required></div>
-                    <div class="form-group"><label>National ID / Asylum Seeker ID</label><input type="text" name="national_id" required></div>
-                    <div class="form-group"><label>Asylum Cert (if Asylum Seeker)</label><input type="text" name="asylum_cert"></div>
-                </div>
-                <h4 style="margin-top: 20px;">Origin Details</h4>
-                <div class="grid">
-                    <div class="form-group"><label>Origin Country</label><input type="text" name="origin_country" required></div>
-                    <div class="form-group"><label>Province</label><input type="text" name="province" required></div>
-                    <div class="form-group"><label>District</label><input type="text" name="district" required></div>
-                    <div class="form-group"><label>Sector</label><input type="text" name="sector" required></div>
-                    <div class="form-group"><label>Cell</label><input type="text" name="cell" required></div>
-                    <div class="form-group"><label>Village</label><input type="text" name="village" required></div>
-                </div>
-                <h4 style="margin-top: 20px;">Academic & Guardian Details</h4>
-                <div class="grid">
-                    <div class="form-group"><label>A-Level Subject Studied</label><input type="text" name="alevel_subject" required></div>
-                    <div class="form-group"><label>Father's Name</label><input type="text" name="father_name" required></div>
-                    <div class="form-group"><label>Mother's Name</label><input type="text" name="mother_name" required></div>
-                    <div class="form-group"><label>Parent/Guardian Names</label><input type="text" name="parent_names" required></div>
-                    <div class="form-group"><label>Parent/Guardian Phone</label><input type="text" name="parent_phone" required></div>
-                    <div class="form-group"><label>Student Email Address</label><input type="email" name="email" required></div>
-                    <div class="form-group">
-                        <label>Select Refugee Camp</label>
-                        <select name="camp" required>
-                            <option value="Kiziba">Kiziba</option>
-                            <option value="Gihembe">Gihembe</option>
-                            <option value="Nyabiheke">Nyabiheke</option>
-                            <option value="Mugombwa">Mugombwa</option>
-                            <option value="Mahama">Mahama</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="grid">
-                    <div class="form-group">
-                        <label>Upload Result Slip (Image)</label>
-                        <input type="file" name="result_slip" accept="image/*" onchange="previewImage(event, 'univ_slip_prev')" required>
-                        <img id="univ_slip_prev" class="preview-img" alt="Preview Image" style="display:none;">
-                    </div>
-                    <div class="form-group">
-                        <label>Photocopy of Original Proof (Image)</label>
-                        <input type="file" name="proof_photocopy" accept="image/*" onchange="previewImage(event, 'univ_proof_prev')" required>
-                        <img id="univ_proof_prev" class="preview-img" alt="Preview Image" style="display:none;">
-                    </div>
-                </div>
-                <button type="submit" name="submit_university">Submit University Application</button>
-            </form>
-        </div>
-
-        <!-- ================= A-LEVEL SECTION ================= -->
-        <div id="alevel" class="page-section">
-            <h2>A-Level Entry Application Form</h2>
-            <form action="index.php" method="POST" enctype="multipart/form-data">
-                <div class="grid">
-                    <div class="form-group"><label>Full Student Name</label><input type="text" name="student_name" required></div>
-                    <div class="form-group"><label>S3 Score/Marks (>=70)</label><input type="number" name="marks" required></div>
-                    <div class="form-group"><label>National ID / Asylum Seeker ID</label><input type="text" name="national_id" required></div>
-                    <div class="form-group"><label>Asylum Cert (if Asylum Seeker)</label><input type="text" name="asylum_cert"></div>
-                </div>
-                <h4 style="margin-top: 20px;">Origin Details</h4>
-                <div class="grid">
-                    <div class="form-group"><label>Origin Country</label><input type="text" name="origin_country" required></div>
-                    <div class="form-group"><label>Province</label><input type="text" name="province" required></div>
-                    <div class="form-group"><label>District</label><input type="text" name="district" required></div>
-                    <div class="form-group"><label>Sector</label><input type="text" name="sector" required></div>
-                    <div class="form-group"><label>Cell</label><input type="text" name="cell" required></div>
-                    <div class="form-group"><label>Village</label><input type="text" name="village" required></div>
-                </div>
-                <h4 style="margin-top: 20px;">Guardian & Camp Details</h4>
-                <div class="grid">
-                    <div class="form-group"><label>Father's Name</label><input type="text" name="father_name" required></div>
-                    <div class="form-group"><label>Mother's Name</label><input type="text" name="mother_name" required></div>
-                    <div class="form-group"><label>Parent/Guardian Names</label><input type="text" name="parent_names" required></div>
-                    <div class="form-group"><label>Parent/Guardian Phone</label><input type="text" name="parent_phone" required></div>
-                    <div class="form-group"><label>Email Address</label><input type="email" name="email" required></div>
-                    <div class="form-group">
-                        <label>Select Refugee Camp</label>
-                        <select name="camp" required>
-                            <option value="Kiziba">Kiziba</option>
-                            <option value="Gihembe">Gihembe</option>
-                            <option value="Nyabiheke">Nyabiheke</option>
-                            <option value="Mugombwa">Mugombwa</option>
-                            <option value="Mahama">Mahama</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="grid">
-                    <div class="form-group">
-                        <label>Upload Result Slip (Image)</label>
-                        <input type="file" name="result_slip" accept="image/*" onchange="previewImage(event, 'alevel_slip_prev')" required>
-                        <img id="alevel_slip_prev" class="preview-img" alt="Preview Image" style="display:none;">
-                    </div>
-                    <div class="form-group">
-                        <label>Photocopy of Original Proof (Image)</label>
-                        <input type="file" name="proof_photocopy" accept="image/*" onchange="previewImage(event, 'alevel_proof_prev')" required>
-                        <img id="alevel_proof_prev" class="preview-img" alt="Preview Image" style="display:none;">
-                    </div>
-                </div>
-                <button type="submit" name="submit_alevel">Submit A-Level Application</button>
-            </form>
-        </div>
-
-        <!-- ================= SUMMER TRAINING ================= -->
-        <div id="summer" class="page-section">
-            <h2>Summer Training Registration</h2>
-            <p>Dedicated to students who completed S5 / Level 4 advancing to S6 / Level 5.</p>
-            <form action="index.php" method="POST">
-                <div class="grid">
-                    <div class="form-group"><label>Full Student Name</label><input type="text" name="student_name" required></div>
-                    <div class="form-group">
-                        <label>Current Level Completed</label>
-                        <select name="previous_level" required>
-                            <option value="S5">S5</option>
-                            <option value="Level 4">Level 4 (TVET)</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Next Level Entering</label>
-                        <select name="next_level" required>
-                            <option value="S6">S6</option>
-                            <option value="Level 5">Level 5 (TVET)</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="grid">
-                    <div class="form-group"><label>School Name</label><input type="text" name="school_name" required></div>
-                    <div class="form-group"><label>Trade / Subject Studied</label><input type="text" name="subject_studied" required></div>
-                    <div class="form-group"><label>Parent Phone Number</label><input type="text" name="parent_phone" required></div>
-                    <div class="form-group">
-                        <label>Gender</label>
-                        <select name="gender" required>
-                            <option value="Male">Male</option>
-                            <option value="Female">Female</option>
-                        </select>
-                    </div>
-                </div>
-                <button type="submit" name="submit_summer">Register Summer Training</button>
-            </form>
-        </div>
-
-        <!-- ================= SHORT COURSES ================= -->
-        <div id="short_course_nav" class="page-section">
-            <h2>Non-University / Short Course Application</h2>
-            <form action="index.php" method="POST" enctype="multipart/form-data">
-                <div class="grid">
-                    <div class="form-group"><label>Full Student Name</label><input type="text" name="student_name" required></div>
-                    <div class="form-group"><label>National ID / UNHCR ID</label><input type="text" name="national_id" required></div>
-                    <div class="form-group"><label>Trade Studied in S6 / L5</label><input type="text" name="course_studied" required></div>
-                    <div class="form-group"><label>School Attended</label><input type="text" name="school_attended" required></div>
-                </div>
-                <div class="grid">
-                    <div class="form-group"><label>Desired Course</label><input type="text" name="course_desired" required></div>
-                    <div class="form-group">
-                        <label>Select Refugee Camp</label>
-                        <select name="camp" required>
-                            <option value="Kiziba">Kiziba</option>
-                            <option value="Gihembe">Gihembe</option>
-                            <option value="Nyabiheke">Nyabiheke</option>
-                            <option value="Mugombwa">Mugombwa</option>
-                            <option value="Mahama">Mahama</option>
-                        </select>
-                    </div>
-                    <div class="form-group"><label>Origin Country</label><input type="text" name="origin_country" required></div>
-                    <div class="form-group"><label>Province</label><input type="text" name="province" required></div>
-                </div>
-                <div class="grid">
-                    <div class="form-group"><label>District</label><input type="text" name="district" required></div>
-                    <div class="form-group"><label>Sector</label><input type="text" name="sector" required></div>
-                    <div class="form-group"><label>Cell</label><input type="text" name="cell" required></div>
-                    <div class="form-group"><label>Village</label><input type="text" name="village" required></div>
-                </div>
-                <div class="grid">
-                    <div class="form-group">
-                        <label>Upload Diploma/Certificate (Image/PDF)</label>
-                        <input type="file" name="diploma_upload" required>
-                    </div>
-                </div>
-                <button type="submit" name="submit_short">Submit Short Course Application</button>
-            </form>
-        </div>
-
-        <!-- ================= UNHCR UPDATES ================= -->
-        <div id="unhcr_updates" class="page-section">
-            <h2>UNHCR Updates & Announcements</h2>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Title</th>
-                            <th>Category</th>
-                            <th>Target Camp</th>
-                            <th>Effective Date</th>
-                            <th>Status</th>
-                            <th>Description</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        $unhcr_query = $conn->query("SELECT * FROM unhcr_updates ORDER BY created_at DESC");
-                        if ($unhcr_query && $unhcr_query->num_rows > 0) {
-                            while($row = $unhcr_query->fetch_assoc()) {
-                                echo "<tr>
-                                    <td><strong>".htmlspecialchars($row['title'])."</strong></td>
-                                    <td>".htmlspecialchars($row['category'])."</td>
-                                    <td>".htmlspecialchars($row['target_camp'])."</td>
-                                    <td>".htmlspecialchars($row['effective_date'])."</td>
-                                    <td><span class='badge badge-accepted'>".htmlspecialchars($row['status'])."</span></td>
-                                    <td>".htmlspecialchars($row['description'])."</td>
-                                </tr>";
-                            }
-                        } else {
-                            echo "<tr><td colspan='6'>No UNHCR Updates available yet.</td></tr>";
-                        }
-                        ?>
-                    </tbody>
-                </table>
+            <div class="input-group">
+                <label>Itariki y'Amavuko (DOB)</label>
+                <input type="date" name="dob" required />
+            </div>
+            <div class="input-group">
+                <label>Igitsina (Gender)</label>
+                <select name="gender" required>
+                    <option value="Male">Gabo</option>
+                    <option value="Female">Gore</option>
+                </select>
+            </div>
+            <div class="input-group">
+                <label>Nimero ya Telefone</label>
+                <input type="text" name="phone" placeholder="078..." required />
             </div>
         </div>
 
-        <!-- ================= HOSPITAL INFORMATION ================= -->
-        <div id="hospital_info" class="page-section">
-            <h2>Hospital Treatment Records & Invoices</h2>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Invoice #</th>
-                            <th>Hospital</th>
-                            <th>Student ID</th>
-                            <th>Student Name</th>
-                            <th>School</th>
-                            <th>Disease</th>
-                            <th>Medication</th>
-                            <th>Amount Paid</th>
-                            <th>Date & Time</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        $hospital_query = $conn->query("SELECT * FROM hospital_records ORDER BY created_at DESC");
-                        if ($hospital_query && $hospital_query->num_rows > 0) {
-                            while($row = $hospital_query->fetch_assoc()) {
-                                echo "<tr>
-                                    <td><strong>".htmlspecialchars($row['invoice_number'])."</strong></td>
-                                    <td>".htmlspecialchars($row['hospital_name'])."</td>
-                                    <td>".htmlspecialchars($row['student_id'])."</td>
-                                    <td>".htmlspecialchars($row['student_name'])."</td>
-                                    <td>".htmlspecialchars($row['school_name'])."</td>
-                                    <td>".htmlspecialchars($row['disease'])."</td>
-                                    <td>".htmlspecialchars($row['medication'])."</td>
-                                    <td>".number_format($row['amount_paid'], 2)." RWF</td>
-                                    <td>".htmlspecialchars($row['treatment_datetime'])."</td>
-                                </tr>";
-                            }
-                        } else {
-                            echo "<tr><td colspan='9'>No hospital records registered yet.</td></tr>";
-                        }
-                        ?>
-                    </tbody>
-                </table>
+        <!-- 2. IBIRANGA UMUNTU (BIOMETRICS & PHOTO) -->
+        <h3>2. Biometric Captures (Isura, Igikumwe, Intoki, Amaso)</h3>
+        <div class="devices-grid">
+            
+            <!-- A. ISURA / IFOTO -->
+            <div class="device-card">
+                <h4>1. Isura / Ifoto (Face)</h4>
+                <video id="camera-preview" autoplay playsinline></video>
+                <div id="face-status" class="status-badge" style="margin-top:8px;">Camera Standby</div>
+                <input type="hidden" name="photo" id="photo_input">
+                <button type="button" class="btn-capture" style="margin-top:8px;" onclick="captureFace()">Fata Ifoto (Capture)</button>
             </div>
+
+            <!-- B. IGIKUMWE -->
+            <div class="device-card">
+                <h4>2. Igikumwe (Thumbprint)</h4>
+                <p style="color:#94a3b8; font-size:0.8rem;">Soma Igikumwe</p>
+                <div id="thumb-status" class="status-badge">Standby</div>
+                <div class="progress-bar"><div id="thumb-progress" class="progress-fill"></div></div>
+                <input type="hidden" name="thumbprint" id="thumb_input">
+                <button type="button" class="btn-capture" onclick="simulateDevice('thumb')">Soma Igikumwe</button>
+            </div>
+
+            <!-- C. INTOKI ZOSE -->
+            <div class="device-card">
+                <h4>3. Intoki zose 10 (Fingerprints)</h4>
+                <p style="color:#94a3b8; font-size:0.8rem;">Slap Scanner Capture</p>
+                <div id="fp-status" class="status-badge">Standby</div>
+                <div class="progress-bar"><div id="fp-progress" class="progress-fill"></div></div>
+                <input type="hidden" name="fingerprints" id="fp_input">
+                <button type="button" class="btn-capture" onclick="simulateDevice('fp')">Soma Intoki Zose</button>
+            </div>
+
+            <!-- D. AMASO -->
+            <div class="device-card">
+                <h4>4. Amaso (Iris Scan)</h4>
+                <p style="color:#94a3b8; font-size:0.8rem;">Dual Iris Capture</p>
+                <div id="iris-status" class="status-badge">Standby</div>
+                <div class="progress-bar"><div id="iris-progress" class="progress-fill"></div></div>
+                <input type="hidden" name="iris" id="iris_input">
+                <button type="button" class="btn-capture" onclick="simulateDevice('iris')">Soma Amaso</button>
+            </div>
+
         </div>
 
-        <!-- ================= ALL STUDENTS DASHBOARD ================= -->
-        <div id="all_students" class="page-section">
-            <h2>All Enrolled Students Dashboard</h2>
-            <p>Amakuru y'abanyeshuri bose banditse muri University, A-Level, no muri Short Courses.</p>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Full Name</th>
-                            <th>Category</th>
-                            <th>Camp</th>
-                            <th>Marks / Trade</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        $univ_st = $conn->query("SELECT student_name, 'University' as cat, camp, marks as info, status FROM university");
-                        if ($univ_st) {
-                            while($r = $univ_st->fetch_assoc()) {
-                                $badge = ($r['status'] == 'Accepted') ? 'badge-accepted' : 'badge-rejected';
-                                echo "<tr><td>".htmlspecialchars($r['student_name'])."</td><td>".htmlspecialchars($r['cat'])."</td><td>".htmlspecialchars($r['camp'])."</td><td>".htmlspecialchars($r['info'])." Marks</td><td><span class='badge {$badge}'>".htmlspecialchars($r['status'])."</span></td></tr>";
-                            }
-                        }
-                        
-                        $alevel_st = $conn->query("SELECT student_name, 'A-Level' as cat, camp, marks as info, status FROM alevel");
-                        if ($alevel_st) {
-                            while($r = $alevel_st->fetch_assoc()) {
-                                $badge = ($r['status'] == 'Accepted') ? 'badge-accepted' : 'badge-rejected';
-                                echo "<tr><td>".htmlspecialchars($r['student_name'])."</td><td>".htmlspecialchars($r['cat'])."</td><td>".htmlspecialchars($r['camp'])."</td><td>".htmlspecialchars($r['info'])." Marks</td><td><span class='badge {$badge}'>".htmlspecialchars($r['status'])."</span></td></tr>";
-                            }
-                        }
-                        ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+        <button type="submit" class="btn-submit">OHEREZA UBUSARE MURI SYSTEM (ENROLL)</button>
+    </form>
 
-        <!-- ================= ALL SCHOOLS (NEWS & FEES) ================= -->
-        <div id="all_schools" class="page-section">
-            <h2>All Partner Schools Overview (News & Fees)</h2>
-            <p>Amashuri yose afitanye amasezerano na Impact Hope Rwanda, amafaranga y'ishuri n'amatangazo.</p>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>School Name</th>
-                            <th>Location</th>
-                            <th>Tuition Fee</th>
-                            <th>Boarding Fee</th>
-                            <th>Announcements / News</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        $sch_q = $conn->query("SELECT * FROM partner_schools ORDER BY school_name ASC");
-                        if ($sch_q && $sch_q->num_rows > 0) {
-                            while($sch = $sch_q->fetch_assoc()) {
-                                echo "<tr>
-                                    <td><strong>".htmlspecialchars($sch['school_name'])."</strong></td>
-                                    <td>".htmlspecialchars($sch['location'])."</td>
-                                    <td>".number_format($sch['tuition_fee'], 2)." RWF</td>
-                                    <td>".number_format($sch['boarding_fee'], 2)." RWF</td>
-                                    <td>".htmlspecialchars($sch['announcements'])."</td>
-                                </tr>";
-                            }
-                        } else {
-                            echo "<tr><td colspan='5'>Nta makuru y'amashuri aratangazwa.</td></tr>";
-                        }
-                        ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- ================= ALL DB INFORMATION ================= -->
-        <div id="all_info" class="page-section">
-            <h2>All System Records (System Logs & Database History)</h2>
-            <p>Incamake y'ibiri mu mashini n'amashakiro yose ya Database.</p>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Action</th>
-                            <th>Details</th>
-                            <th>Timestamp</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        $logs_q = $conn->query("SELECT * FROM system_logs ORDER BY created_at DESC LIMIT 20");
-                        if ($logs_q && $logs_q->num_rows > 0) {
-                            while($log = $logs_q->fetch_assoc()) {
-                                echo "<tr>
-                                    <td>".$log['id']."</td>
-                                    <td><strong>".htmlspecialchars($log['action'])."</strong></td>
-                                    <td>".htmlspecialchars($log['details'])."</td>
-                                    <td>".htmlspecialchars($log['created_at'])."</td>
-                                </tr>";
-                            }
-                        } else {
-                            echo "<tr><td colspan='4'>Nta bintu birakorwa muri log za system.</td></tr>";
-                        }
-                        ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-    <?php endif; ?>
+    <!-- LIST YA ABATURAGE -->
+    <h3 style="margin-top: 40px; color: #38bdf8;">Abaturage Bamaze Kwandikwa</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>UIN</th>
+                <th>National ID</th>
+                <th>Izina</th>
+                <th>Ifoto</th>
+                <th>Telefone</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php if(empty($citizens)): ?>
+                <tr><td colspan="5" style="text-align:center; color:#94a3b8;">Nta muturage uragera mu bubiko.</td></tr>
+            <?php else: ?>
+                <?php foreach($citizens as $c): ?>
+                    <tr>
+                        <td><strong style="color:#22c55e;"><?= htmlspecialchars($c['uin']) ?></strong></td>
+                        <td><?= htmlspecialchars($c['national_id_ref']) ?></td>
+                        <td><?= htmlspecialchars($c['full_name']) ?></td>
+                        <td><img src="<?= $c['face_photo'] ?>" style="width:40px; height:40px; border-radius:50%; object-fit:cover;"></td>
+                        <td><?= htmlspecialchars($c['phone']) ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            <?php endif; ?>
+        </tbody>
+    </table>
 </div>
 
-<footer>
-    <div class="footer-grid">
-        <div>
-            <h4>Impact Hope in Rwanda</h4>
-            <p>Empowering refugee youth through education and healthcare access.</p>
-        </div>
-        <div>
-            <h4>Quick Contact</h4>
-            <p>Email: support@impacthope.org<br>Phone: +250 780 000 000</p>
-        </div>
-    </div>
-    <div class="footer-bottom">
-        &copy; <?php echo date("Y"); ?> Impact Hope in Rwanda. All Rights Reserved.
-    </div>
-</footer>
-
 <script>
-function showSection(sectionId) {
-    var sections = document.getElementsByClassName('page-section');
-    for (var i = 0; i < sections.length; i++) {
-        sections[i].classList.remove('active');
-    }
-    
-    var navLinks = document.querySelectorAll('nav a');
-    for (var j = 0; j < navLinks.length; j++) {
-        navLinks[j].classList.remove('active');
-    }
-    
-    document.getElementById(sectionId).classList.add('active');
-    var activeNav = document.getElementById('nav-' + sectionId);
-    if(activeNav) {
-        activeNav.classList.add('active');
-    }
+// Camera Capture Setup
+const video = document.getElementById('camera-preview');
+const photoInput = document.getElementById('photo_input');
+
+if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    navigator.mediaDevices.getUserMedia({ video: true }).then(stream => { video.srcObject = stream; });
 }
 
-function previewImage(event, previewId) {
-    var reader = new FileReader();
-    reader.onload = function(){
-        var output = document.getElementById(previewId);
-        output.src = reader.result;
-        output.style.display = 'block';
-    };
-    reader.readAsDataURL(event.target.files[0]);
+function captureFace() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 200; canvas.height = 150;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    photoInput.value = canvas.toDataURL('image/jpeg');
+    document.getElementById('face-status').innerText = "Captured OK";
+    document.getElementById('face-status').className = "status-badge active";
+}
+
+// Biometric Capture Simulator
+function simulateDevice(type) {
+    let score = 0;
+    let interval = setInterval(() => {
+        score += 25;
+        document.getElementById(type + '-progress').style.width = score + '%';
+        if (score >= 100) {
+            clearInterval(interval);
+            document.getElementById(type + '-status').innerText = "Captured OK";
+            document.getElementById(type + '-status').className = "status-badge active";
+            document.getElementById(type + '_input').value = "DEVICE_HARDWARE_DATA_" + type.toUpperCase();
+        }
+    }, 150);
 }
 </script>
+
 </body>
 </html>
